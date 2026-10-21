@@ -18,11 +18,11 @@
 Run this single command on your clean **Ubuntu 24.04 LTS** VPS with `root` privileges:
 
 ```bash
-bash <(curl -sSL https://raw.githubusercontent.com/lutfialifofc-droid/pterodactyl-ubuntu-installer/main/install.sh)
+bash <(curl -sSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME/main/install.sh)
 ```
 
 > [!NOTE]
-> Replace `lutfialifofc-droid/pterodactyl-ubuntu-installer` with your actual GitHub repository name once pushed.
+> Replace `YOUR_GITHUB_USERNAME/YOUR_REPO_NAME` with your actual GitHub repository name once pushed.
 
 ---
 
@@ -57,6 +57,8 @@ Please choose an option:
   [2] Install Wings (Daemon)
   [3] Install Both (Panel + Wings on this VPS)
   [4] Update Existing Panel
+  [5] Configure / Start Wings
+  [6] Troubleshoot / Debug Wings
   [0] Exit
 ```
 
@@ -109,7 +111,7 @@ If you prefer to download and inspect the script locally before running:
 
 ```bash
 # 1. Download the script
-curl -sSL -o install.sh https://raw.githubusercontent.com/lutfialifofc-droid/pterodactyl-ubuntu-installer/main/install.sh
+curl -sSL -o install.sh https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME/main/install.sh
 
 # 2. Make it executable
 chmod +x install.sh
@@ -124,15 +126,42 @@ sudo ./install.sh
 
 After installing **Wings** (Option 2 or 3):
 1. Log in to your Pterodactyl Panel web interface.
-2. Navigate to **Admin Area** (`/admin`) ➔ **Nodes** ➔ **Create New**.
-3. Fill in your node name, FQDN/IP address, and memory/disk allocations.
-4. Click the newly created node, navigate to the **Configuration** tab.
-5. Copy the configuration block or auto-deploy command and save it to `/etc/pterodactyl/config.yml`.
-6. Start the Wings service on your node:
-   ```bash
-   systemctl start wings
-   systemctl status wings
-   ```
+2. Navigate to **Admin Area** (`/admin`) ➔ **Locations** (ensure at least one location exists, e.g. "Local").
+3. Navigate to **Nodes** ➔ **Create New**.
+4. Fill in your node details:
+   - **FQDN**: Your server domain or IP.
+   - **Communicate Over SSL**: Use SSL if you configured Let's Encrypt with a domain; select HTTP if using a bare IP address.
+   - **Daemon Port**: `8080`, **Daemon SFTP Port**: `2022`.
+5. Click your new node, navigate to the **Configuration** tab.
+6. Copy the **Auto-Deploy** command, or copy the YAML content.
+7. Either:
+   - Run the script again and select **`[5] Configure / Start Wings`** to paste the command interactively, **OR**
+   - Run the command directly in your VPS terminal, **OR**
+   - Save the YAML to `/etc/pterodactyl/config.yml` and run:
+     ```bash
+     sudo systemctl enable --now wings
+     sudo systemctl status wings
+     ```
+
+---
+
+## 🔧 Troubleshooting Wings (`status=1/FAILURE` or Auto-Restart Loop)
+
+If Wings fails to start or shows `Active: activating (auto-restart)`:
+1. **Run Option `[6] Troubleshoot / Debug Wings`** directly in `./install.sh` for an automatic health check and log view.
+2. **Common Causes**:
+   - **Missing Configuration**: Wings cannot run without `/etc/pterodactyl/config.yml`. Do not start Wings until you generate this from the Panel!
+   - **Reset Failed Systemd State**: If Wings crashed repeatedly, systemd rate-limits starts. Run:
+     ```bash
+     sudo systemctl stop wings
+     sudo systemctl reset-failed wings
+     sudo systemctl start wings
+     ```
+   - **SSL Mismatch**: If `ssl.enabled: true` in `/etc/pterodactyl/config.yml`, but certificates do not exist in `/etc/letsencrypt/live/...`, Wings will crash. For non-SSL or IP setups, set `enabled: false` under `ssl`.
+   - **Check Debug Output**:
+     ```bash
+     sudo wings --debug
+     ```
 
 ---
 

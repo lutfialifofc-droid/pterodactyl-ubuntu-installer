@@ -228,14 +228,14 @@ EOF
 [Unit]
 Description=Pterodactyl Queue Worker
 After=redis-server.service
+StartLimitIntervalSec=180
+StartLimitBurst=30
 
 [Service]
 User=www-data
 Group=www-data
 Restart=always
 ExecStart=/usr/bin/php /var/www/pterodactyl/artisan queue:work --queue=high,standard,low --sleep=3 --tries=3
-StartLimitInterval=180
-StartLimitBurst=30
 RestartSec=5s
 
 [Install]
@@ -335,23 +335,42 @@ install_wings() {
 
     # Step 1: Install Docker
     log_info "Installing Docker Engine..."
-    curl -sSL https://get.docker.com/ | CHANNEL=stable bash >> "$LOG_FILE" 2>&1
+    if ! command -v docker >/dev/null 2>&1; then
+        curl -fsSL https://get.docker.com/ | CHANNEL=stable bash >> "$LOG_FILE" 2>&1
+    fi
     systemctl enable --now docker >> "$LOG_FILE" 2>&1
 
     # Step 2: Download Wings Binary
     log_info "Downloading Wings daemon binary..."
     mkdir -p /etc/pterodactyl
     ARCH=$(uname -m)
-    if [ "$ARCH" == "x86_64" ]; then
+    if [ "$ARCH" = "x86_64" ]; then
         WINGS_ARCH="amd64"
-    else
+    elif [ "$ARCH" = "aarch64" ]; then
         WINGS_ARCH="arm64"
+    else
+        log_error "Unsupported CPU architecture: $ARCH"
+        exit 1
     fi
 
-    curl -L -o /usr/local/bin/wings "https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_${WINGS_ARCH}" >> "$LOG_FILE" 2>&1
-    chmod u+x /usr/local/bin/wings
+    if ! curl -fsSL -o /usr/local/bin/wings "https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_${WINGS_ARCH}"; then
+        log_error "Failed to download Wings binary from GitHub. Check your network or GitHub access."
+        exit 1
+    fi
+    chmod +x /usr/local/bin/wings
 
-    # Step 3: Create systemd unit file
+    # Step 3: Configure UFW & Docker networking if UFW is active
+    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+        log_info "Configuring UFW rules for Wings (8080/tcp, 2022/tcp)..."
+        ufw allow 8080/tcp comment "Pterodactyl Wings API" >> "$LOG_FILE" 2>&1
+        ufw allow 2022/tcp comment "Pterodactyl Wings SFTP" >> "$LOG_FILE" 2>&1
+        if [ -f /etc/default/ufw ]; then
+            sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
+            ufw reload >> "$LOG_FILE" 2>&1
+        fi
+    fi
+
+    # Step 4: Create systemd unit file (Compatible with Ubuntu 24.04 LTS / systemd 255)
     log_info "Creating systemd service for Wings..."
     cat << EOF > /etc/systemd/system/wings.service
 [Unit]
@@ -359,16 +378,15 @@ Description=Pterodactyl Wings Daemon
 After=docker.service
 Requires=docker.service
 PartOf=docker.service
+StartLimitIntervalSec=180
+StartLimitBurst=30
 
 [Service]
 User=root
 WorkingDirectory=/etc/pterodactyl
 LimitNOFILE=4096
-PIDFile=/var/run/wings/daemon.pid
 ExecStart=/usr/local/bin/wings
 Restart=on-failure
-StartLimitInterval=180
-StartLimitBurst=30
 RestartSec=5s
 
 [Install]
@@ -376,20 +394,199 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable wings >> "$LOG_FILE" 2>&1
 
     print_banner
-    log_success "Wings daemon binary and service installed successfully!"
+    log_success "Wings daemon binary and systemd service created successfully!"
     echo -e "\n${BOLD}================ NEXT STEPS FOR WINGS ================${NC}"
+    echo -e "Wings requires a configuration file from your Panel before it can run.\n"
     echo -e "1. Open your Pterodactyl Panel Web UI."
-    echo -e "2. Go to ${CYAN}Admin Area -> Nodes -> Create New${NC}."
-    echo -e "3. Once created, click on the node and open the ${CYAN}'Configuration'${NC} tab."
-    echo -e "4. Copy the YAML config or use the 'Auto-Deploy' token command, or paste content to:"
-    echo -e "   ${YELLOW}/etc/pterodactyl/config.yml${NC}"
-    echo -e "5. Start wings using:"
-    echo -e "   ${GREEN}systemctl start wings${NC}"
-    echo -e "   Check status with: ${GREEN}systemctl status wings${NC}"
-    echo -e "${BOLD}======================================================${NC}\n"
+    echo -e "2. Ensure a Location exists (${CYAN}Admin -> Locations${NC})."
+    echo -e "3. Create a Node (${CYAN}Admin -> Nodes -> Create New${NC}):"
+    echo -e "   - FQDN: ${YELLOW}Your domain (or IP address)${NC}"
+    echo -e "   - Communicate Over SSL: ${YELLOW}Use SSL if you have HTTPS domain; HTTP if using bare IP${NC}"
+    echo -e "   - Daemon Port: ${YELLOW}8080${NC} | SFTP Port: ${YELLOW}2022${NC}"
+    echo -e "4. Open the created node and click the ${CYAN}'Configuration'${NC} tab."
+    echo -e "5. Copy the ${GREEN}Auto-Deploy${NC} command, or copy the YAML content.\n"
+
+    prompt_read "Do you want to paste your Auto-Deploy command now? (y/N): " HAS_AUTODEPLOY
+    if [[ "$HAS_AUTODEPLOY" =~ ^[Yy]$ ]]; then
+        configure_wings
+    else
+        echo -e "\n${YELLOW}When ready, run:${NC}"
+        echo -e "  - Paste Auto-Deploy command, OR save content to: ${BOLD}/etc/pterodactyl/config.yml${NC}"
+        echo -e "  - Start Wings: ${GREEN}systemctl enable --now wings${NC}"
+        echo -e "  - Check status: ${GREEN}systemctl status wings${NC}"
+        echo -e "  - (You can also re-run this script and select option [5] to configure Wings anytime)\n"
+    fi
+}
+
+# ------------------------------------------------------------------------------
+# CONFIGURE WINGS INTERACTIVELY
+# ------------------------------------------------------------------------------
+configure_wings() {
+    print_banner
+    log_info "Configuring Pterodactyl Wings..."
+    echo -e "\n${BOLD}Choose configuration method:${NC}"
+    echo -e "  [1] Paste Auto-Deploy command from Panel"
+    echo -e "  [2] Paste YAML content directly"
+    echo -e "  [0] Cancel"
+    echo ""
+    prompt_read "Enter choice [0-2]: " CFG_CHOICE
+
+    case "$CFG_CHOICE" in
+        1)
+            prompt_read "Paste Auto-Deploy command: " DEPLOY_CMD
+            if [ -n "$DEPLOY_CMD" ]; then
+                log_info "Executing auto-deploy command..."
+                eval "$DEPLOY_CMD"
+            fi
+            ;;
+        2)
+            echo -e "${CYAN}Opening /etc/pterodactyl/config.yml in nano... Paste your YAML and press Ctrl+O, Enter, Ctrl+X${NC}"
+            sleep 2
+            nano /etc/pterodactyl/config.yml
+            ;;
+        0)
+            return 0
+            ;;
+        *)
+            echo -e "${RED}Invalid choice.${NC}"
+            return 1
+            ;;
+    esac
+
+    if [ -f "/etc/pterodactyl/config.yml" ]; then
+        log_info "Verifying configuration..."
+        systemctl daemon-reload
+        systemctl reset-failed wings >> "$LOG_FILE" 2>&1
+        systemctl enable --now wings >> "$LOG_FILE" 2>&1
+        sleep 2
+        if systemctl is-active --quiet wings; then
+            log_success "Wings daemon is active and running!"
+        else
+            log_warning "Wings failed to start cleanly. Checking logs..."
+            journalctl -u wings -n 20 --no-pager
+            echo -e "\n${YELLOW}Tip: You can select option [6] from the menu to troubleshoot.${NC}"
+        fi
+    else
+        log_error "/etc/pterodactyl/config.yml was not found."
+    fi
+}
+
+# ------------------------------------------------------------------------------
+# TROUBLESHOOT WINGS
+# ------------------------------------------------------------------------------
+troubleshoot_wings() {
+    print_banner
+    echo -e "${BOLD}=== Pterodactyl Wings Diagnostic & Fix Tool ===${NC}\n"
+
+    # Stop ongoing crash loop and clear failed state
+    log_info "Resetting systemd failed state for wings..."
+    systemctl stop wings >> "$LOG_FILE" 2>&1
+    systemctl reset-failed wings >> "$LOG_FILE" 2>&1
+
+    # 1. Check Docker
+    log_info "Checking Docker daemon status..."
+    if ! command -v docker >/dev/null 2>&1; then
+        log_error "Docker is NOT installed!"
+    elif ! systemctl is-active --quiet docker; then
+        log_warning "Docker service is not running. Attempting to start Docker..."
+        systemctl enable --now docker >> "$LOG_FILE" 2>&1
+        if systemctl is-active --quiet docker; then
+            log_success "Docker started successfully."
+        else
+            log_error "Failed to start Docker! Check 'journalctl -u docker'."
+        fi
+    else
+        log_success "Docker is active and running."
+    fi
+
+    # 2. Check Wings Binary
+    log_info "Checking Wings executable..."
+    if [ ! -f "/usr/local/bin/wings" ]; then
+        log_error "Wings binary (/usr/local/bin/wings) is missing!"
+    elif [ ! -x "/usr/local/bin/wings" ]; then
+        log_warning "Wings binary is not executable. Adding execute permission..."
+        chmod +x /usr/local/bin/wings
+        log_success "Execute permission added."
+    else
+        WINGS_VER=$(/usr/local/bin/wings --version 2>/dev/null || echo "Installed")
+        log_success "Wings binary is present: $WINGS_VER"
+    fi
+
+    # 3. Check config.yml
+    log_info "Checking /etc/pterodactyl/config.yml..."
+    if [ ! -f "/etc/pterodactyl/config.yml" ]; then
+        log_error "Configuration file (/etc/pterodactyl/config.yml) is MISSING!"
+        echo -e "${YELLOW}Wings CANNOT start without config.yml.${NC}"
+        echo -e "You must create a Node in Pterodactyl Panel -> Configuration tab -> copy Auto-Deploy command."
+    else
+        log_success "/etc/pterodactyl/config.yml exists."
+
+        # Check SSL settings in config.yml
+        if grep -q "ssl:" /etc/pterodactyl/config.yml 2>/dev/null; then
+            SSL_ENABLED=$(grep -A 5 "ssl:" /etc/pterodactyl/config.yml | grep "enabled:" | awk '{print $2}')
+            if [ "$SSL_ENABLED" = "true" ]; then
+                CERT_FILE=$(grep "cert:" /etc/pterodactyl/config.yml | awk '{print $2}' | tr -d '"' | tr -d "'")
+                KEY_FILE=$(grep "key:" /etc/pterodactyl/config.yml | awk '{print $2}' | tr -d '"' | tr -d "'")
+                log_info "SSL is enabled in config.yml. Validating certificate paths..."
+                if [ -n "$CERT_FILE" ] && [ ! -f "$CERT_FILE" ]; then
+                    log_error "Certificate file not found: $CERT_FILE"
+                    log_warning "If using IP or without SSL, set 'enabled: false' under ssl in config.yml."
+                fi
+                if [ -n "$KEY_FILE" ] && [ ! -f "$KEY_FILE" ]; then
+                    log_error "Private key file not found: $KEY_FILE"
+                fi
+            else
+                log_info "SSL is disabled in config.yml (HTTP mode)."
+            fi
+        fi
+    fi
+
+    # 4. Check Firewall
+    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+        log_info "Checking UFW firewall status..."
+        if ! ufw status | grep -q "8080"; then
+            log_warning "Port 8080/tcp is NOT allowed in UFW. Allowing..."
+            ufw allow 8080/tcp comment "Pterodactyl Wings API" >> "$LOG_FILE" 2>&1
+        fi
+        if ! ufw status | grep -q "2022"; then
+            log_warning "Port 2022/tcp is NOT allowed in UFW. Allowing..."
+            ufw allow 2022/tcp comment "Pterodactyl Wings SFTP" >> "$LOG_FILE" 2>&1
+        fi
+        log_success "Firewall rules verified."
+    fi
+
+    # 5. Show recent journal logs
+    echo -e "\n${BOLD}=== Recent Wings Journal Logs (Last 20 entries) ===${NC}"
+    journalctl -u wings -n 20 --no-pager
+
+    echo -e "\n${BOLD}=== Diagnostic Actions ===${NC}"
+    echo -e "  [1] Run Wings in debug mode (wings --debug) to see real-time output"
+    echo -e "  [2] Edit /etc/pterodactyl/config.yml"
+    echo -e "  [3] Attempt to start Wings service (systemctl start wings)"
+    echo -e "  [0] Return to Main Menu"
+    echo ""
+    prompt_read "Enter choice [0-3]: " DIAG_ACTION
+
+    case "$DIAG_ACTION" in
+        1)
+            echo -e "${CYAN}Running Wings in debug mode. Press Ctrl+C to exit when finished...${NC}\n"
+            /usr/local/bin/wings --debug
+            ;;
+        2)
+            nano /etc/pterodactyl/config.yml
+            ;;
+        3)
+            systemctl daemon-reload
+            systemctl reset-failed wings
+            systemctl start wings
+            sleep 2
+            systemctl status wings --no-pager
+            ;;
+        *)
+            ;;
+    esac
 }
 
 # ------------------------------------------------------------------------------
@@ -434,9 +631,11 @@ main_menu() {
     echo -e "  [2] Install Wings (Daemon)"
     echo -e "  [3] Install Both (Panel + Wings on this VPS)"
     echo -e "  [4] Update Existing Panel"
+    echo -e "  [5] Configure / Start Wings"
+    echo -e "  [6] Troubleshoot / Debug Wings"
     echo -e "  [0] Exit"
     echo ""
-    prompt_read "Enter choice [0-4]: " CHOICE
+    prompt_read "Enter choice [0-6]: " CHOICE
 
     case "$CHOICE" in
         1)
@@ -451,6 +650,12 @@ main_menu() {
             ;;
         4)
             update_panel
+            ;;
+        5)
+            configure_wings
+            ;;
+        6)
+            troubleshoot_wings
             ;;
         0)
             echo "Exiting..."
