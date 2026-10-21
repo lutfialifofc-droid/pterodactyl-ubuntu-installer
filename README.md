@@ -18,11 +18,11 @@
 Run this single command on your clean **Ubuntu 24.04 LTS** VPS with `root` privileges:
 
 ```bash
-bash <(curl -sSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME/main/install.sh)
+bash <(curl -sSL https://raw.githubusercontent.com/lutfialifofc-droid/pterodactyl-ubuntu-installer/main/install.sh)
 ```
 
 > [!NOTE]
-> Replace `YOUR_GITHUB_USERNAME/YOUR_REPO_NAME` with your actual GitHub repository name once pushed.
+> Replace `lutfialifofc-droid/pterodactyl-ubuntu-installer` with your actual GitHub repository name once pushed.
 
 ---
 
@@ -111,7 +111,7 @@ If you prefer to download and inspect the script locally before running:
 
 ```bash
 # 1. Download the script
-curl -sSL -o install.sh https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME/main/install.sh
+curl -sSL -o install.sh https://raw.githubusercontent.com/lutfialifofc-droid/pterodactyl-ubuntu-installer/main/install.sh
 
 # 2. Make it executable
 chmod +x install.sh
